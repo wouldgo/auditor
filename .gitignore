@@ -1,0 +1,10 @@
+_out/*
+!_out/.keep
+tests/*
+!tests/.keep
+.vscode/*
+!.vscode/launch.json
+/.blackbox/pubring.gpg~
+/.blackbox/pubring.kbx~
+/.blackbox/secring.gpg
+/LOCAL_ENV
