@@ -1,4 +1,4 @@
-FROM golang:1.17-alpine3.14 AS builder
+FROM golang:1.18.0-alpine3.14 AS builder
 
 RUN apk add --no-cache \
   build-base \
@@ -10,10 +10,13 @@ RUN mkdir _out
 COPY cmd cmd
 COPY handling handling
 COPY meta meta
+COPY model model
+COPY options options
 COPY prometheus prometheus
 COPY sni sni
 
 COPY go.mod go.sum Makefile ./
+RUN touch LOCAL_ENV
 RUN make clean-compile-auditor
 
 FROM scratch

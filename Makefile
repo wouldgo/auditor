@@ -8,8 +8,6 @@ VERSION := 2.0.9
 
 include LOCAL_ENV
 
-$(eval export $(shell sed -ne 's/ *#.*$$//; /./ s/=.*$$// p' LOCAL_ENV))
-
 clean-compile-auditor:     clean musl         deps compile-auditor
 clean-compile-sni-catcher: clean musl libpcap deps compile-sni-catcher
 docker-build:              docker-build-auditor    docker-build-sni-catcher
@@ -28,10 +26,10 @@ docker-build-sni-catcher:
 			-f cmd/sni-catcher/Dockerfile \
 			-t ghcr.io/wouldgo/sni-catcher:$(VERSION) .
 
-auditor: deps
+auditor: deps env
 	go run cmd/auditor/*.go
 
-sni-catcher-debug: deps
+sni-catcher-debug: deps env
 	CGO_CPPFLAGS="-I$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/include" \
 	CGO_LDFLAGS="-L$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/lib" \
 	CGO_ENABLED=1 \
@@ -61,6 +59,9 @@ compile-auditor:
 	CGO_ENABLED=0 \
 	go build \
 		-a -o _out/auditor cmd/auditor/*.go
+
+env:
+	$(eval export $(shell sed -ne 's/ *#.*$$//; /./ s/=.*$$// p' LOCAL_ENV))
 
 deps:
 	go mod tidy -v
