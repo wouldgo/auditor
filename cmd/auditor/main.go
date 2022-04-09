@@ -9,8 +9,8 @@ import (
 	_ "github.com/breml/rootcerts"
 
 	"auditor/handling"
+	"auditor/healthiness"
 	"auditor/meta"
-	prometheusMetrics "auditor/prometheus"
 )
 
 func main() {
@@ -39,9 +39,9 @@ func main() {
 		panic(err)
 	}
 
-	go prometheusMetrics.StartupProm(options.Log)
 	go handler.Handle()
-	go meta.FromChan(handler.Ips)
+	go meta.FromChan(handler.Actions)
+	go healthiness.Healthiness(options.Log)
 	sig := <-stop
 	options.Log.Infof("Caught %v", sig)
 

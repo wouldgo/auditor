@@ -1,14 +1,13 @@
 package sni
 
 import (
+	"auditor/meta"
 	"fmt"
-	"time"
 
 	"github.com/bradleyfalzon/tlsx"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -19,19 +18,14 @@ type PcapConfiguration struct {
 type Handler struct {
 	logger      *zap.SugaredLogger
 	pcapHandler *pcap.Handle
-	snisOpts    *prometheus.CounterOpts
-	snis        *prometheus.CounterVec
 
-	C chan string
-
-	resetTicker     *time.Ticker
-	resetTickerDone chan bool
+	C chan *meta.MetaInput
 }
 
 func New(logger *zap.SugaredLogger, pcapConfs *PcapConfiguration) (*Handler, error) {
 	toReturn := &Handler{
 		logger: logger,
-		C:      make(chan string),
+		C:      make(chan *meta.MetaInput),
 	}
 
 	handler, err := pcap.OpenLive(*pcapConfs.Interface, 65536, true, pcap.BlockForever)
@@ -47,52 +41,13 @@ func New(logger *zap.SugaredLogger, pcapConfs *PcapConfiguration) (*Handler, err
 
 	toReturn.pcapHandler = handler
 
-	toReturn.snisOpts = &prometheus.CounterOpts{
-		Name: "home_snis_local",
-		Help: "Home sni's value",
-	}
-
-	toReturn.snis = prometheus.NewCounterVec(*toReturn.snisOpts, []string{
-		"src_addr",
-		"dst_addr",
-
-		"host_name",
-
-		"src_port",
-		"dst_port",
-	})
-
-	prometheus.MustRegister(toReturn.snis)
-	toReturn.resetTicker = time.NewTicker(time.Hour)
-	toReturn.resetTickerDone = make(chan bool)
-	go toReturn.resetTraffic()
-
 	return toReturn, nil
-}
-
-func (h *Handler) resetTraffic() {
-	for {
-		select {
-		case <-h.resetTickerDone:
-			return
-		case t := <-h.resetTicker.C:
-			if t.Hour() == 0 {
-				h.logger.Infof("Resetting snis at %v:%v:%v", t.Hour(), t.Minute(), t.Second())
-				h.snis.Reset()
-			} else {
-
-				h.logger.Debugf("Skip resetting snis at %v:%v:%v", t.Hour(), t.Minute(), t.Second())
-			}
-		}
-	}
 }
 
 func (h *Handler) Close() {
 	h.logger.Info("Closing sni")
 	h.pcapHandler.Close()
-	h.resetTicker.Stop()
-	h.resetTickerDone <- true
-	h.logger.Debug("Reset ticker stopped")
+	h.logger.Debug("Sni closed")
 }
 
 func (h *Handler) Handle() {
@@ -112,8 +67,7 @@ func (h *Handler) Handle() {
 func (h *Handler) managePacket(packet gopacket.Packet) error {
 	srcAddr := "N/A"
 	dstAddr := "N/A"
-	srcPort := "N/A"
-	dstPort := "N/A"
+	var srcPort, dstPort uint16
 	hostName := "N/A"
 
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
@@ -149,26 +103,22 @@ func (h *Handler) managePacket(packet gopacket.Packet) error {
 				return err
 			}
 			hostName = *sniData.sni
-			srcPort = sniData.srcPort.String()
-			dstPort = sniData.dstPort.String()
+
+			srcPort = uint16(*sniData.srcPort)
+			dstPort = uint16(*sniData.dstPort)
 		}
 	}
 
 	if hostName != "N/A" {
 		h.logger.Debugf("Got data from %s:%s to %s:%s resolving %s", srcAddr, srcPort, dstAddr, dstPort, hostName)
 
-		h.snis.WithLabelValues(
-			srcAddr,
-			dstAddr,
-
-			hostName,
-
-			srcPort,
-			dstPort,
-		).Inc()
-
-		h.C <- srcAddr
-		h.C <- dstAddr
+		h.C <- &meta.MetaInput{
+			SrcAddr:  srcAddr,
+			DstAddr:  dstAddr,
+			SrcPort:  srcPort,
+			DstPort:  dstPort,
+			Hostname: hostName,
+		}
 	}
 
 	return nil

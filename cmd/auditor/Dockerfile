@@ -9,10 +9,10 @@ WORKDIR /workspace
 RUN mkdir _out
 COPY cmd cmd
 COPY handling handling
+COPY healthiness healthiness
 COPY meta meta
 COPY model model
 COPY options options
-COPY prometheus prometheus
 COPY sni sni
 
 COPY go.mod go.sum Makefile ./

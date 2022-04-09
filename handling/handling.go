@@ -1,6 +1,7 @@
 package handling
 
 import (
+	"auditor/meta"
 	"context"
 	"net"
 
@@ -21,7 +22,7 @@ type NflowConfiguration struct {
 
 type Handler struct {
 	logger      *zap.SugaredLogger
-	Ips         chan string
+	Actions     chan *meta.MetaInput
 	hostname    string
 	port        int
 	workers     int
@@ -30,25 +31,23 @@ type Handler struct {
 }
 
 func New(ctx context.Context, logger *zap.SugaredLogger, nflowConf *NflowConfiguration) (*Handler, error) {
-	logger.Infof("Searching for format driver prometheus")
+	logger.Info("Initializing handler")
 	formatter, err := format.FindFormat(ctx, "format")
 	if err != nil {
 		return nil, err
 	}
-	logger.Debugf("Found format driver prometheus")
-
-	logger.Infof("Searching for transport driver format")
-	transporter, err := transport.FindTransport(ctx, "prometheus")
+	logger.Debug("Found format")
+	transporter, err := transport.FindTransport(ctx, "to-channel")
 	if err != nil {
 		return nil, err
 	}
-	logger.Debugf("Found transport driver format")
+	logger.Debugf("Found transport")
 
 	port := int(*nflowConf.Port)
 
 	return &Handler{
 		logger:      logger,
-		Ips:         promDriverChannel(),
+		Actions:     promDriverChannel(),
 		hostname:    *nflowConf.Hostname,
 		port:        port,
 		workers:     *nflowConf.Workers,
@@ -57,7 +56,7 @@ func New(ctx context.Context, logger *zap.SugaredLogger, nflowConf *NflowConfigu
 	}, nil
 }
 
-func (h *Handler) Handle() error {
+func (h *Handler) Handle() {
 	sNF := &utils.StateNetFlow{
 		Format:    h.formatter,
 		Transport: h.transporter,
@@ -69,8 +68,6 @@ func (h *Handler) Handle() error {
 
 		panic(err)
 	}
-
-	return nil
 }
 
 func (h *Handler) Close(ctx context.Context) {

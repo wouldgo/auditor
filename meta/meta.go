@@ -38,6 +38,14 @@ type Meta struct {
 	printCacheInfoTicker      *time.Ticker
 }
 
+type MetaInput struct {
+	SrcAddr  string
+	DstAddr  string
+	Hostname string
+	SrcPort  uint16
+	DstPort  uint16
+}
+
 func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 	stringIp := ipAddr.String()
 	value, isCached := meta.cache.Get(stringIp)
@@ -137,17 +145,29 @@ func (meta *Meta) fromString(ipAddr string) (*model.MetaResult, error) {
 	return thisMeta, nil
 }
 
-func (meta *Meta) FromChan(ipChan chan string) {
-	for ip := range ipChan {
-		result, err := meta.fromString(ip)
-		if err != nil {
+func (meta *Meta) FromChan(metaChan chan *MetaInput) {
+	aContext := context.Background()
+	for aMetaInput := range metaChan {
 
-			meta.log.Warn(err)
+		if _, srcAddrErr := meta.fromString(aMetaInput.SrcAddr); srcAddrErr != nil {
+
+			meta.log.Warn(srcAddrErr)
 		}
 
-		if result != nil {
+		if _, dstsrcAddrErr := meta.fromString(aMetaInput.DstAddr); dstsrcAddrErr != nil {
 
-			meta.log.Debugf("%v meta for %s", result.Hostnames, ip)
+			meta.log.Warn(dstsrcAddrErr)
+		}
+
+		if err := meta.model.Action(aContext,
+			aMetaInput.SrcAddr,
+			aMetaInput.DstAddr,
+			aMetaInput.Hostname,
+			aMetaInput.SrcPort,
+			aMetaInput.DstPort,
+		); err != nil {
+
+			meta.log.Warn(err)
 		}
 	}
 }

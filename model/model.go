@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -117,6 +118,27 @@ var (
 		"VALUES($1, $2)",
 		"ON CONFLICT ON CONSTRAINT ips_vulns_pkey",
 		"DO NOTHING",
+	}[:], " ")
+	insertIntoSubjects = strings.Join([]string{
+		"INSERT INTO network.subjects(",
+		"  src_ip, dst_ip",
+		")",
+		"VALUES($1, $2)",
+		"ON CONFLICT ON CONSTRAINT subjects_pkey",
+		"DO NOTHING",
+	}[:], " ")
+	insertIntoActions = strings.Join([]string{
+		"INSERT INTO network.actions(",
+		"  subject_fk, hostname, src_port, dst_port",
+		")",
+		"SELECT ",
+		"  id AS subject_fk,",
+		"  $3 AS hostname,",
+		"  $4 AS src_port,",
+		"  $5 AS dst_port",
+		"FROM network.subjects",
+		"WHERE src_ip = $1",
+		"  AND dst_ip = $2",
 	}[:], " ")
 )
 
@@ -441,6 +463,91 @@ func (model *Model) Store(ctx context.Context, ip string, metaResult *MetaResult
 	} else {
 
 		model.logger.Warnf("No info about %s", ip)
+	}
+
+	tx.Commit(ctx)
+	return nil
+}
+
+func (model *Model) Action(ctx context.Context, srcIp, dstIp, hostname string, srcPort, dstPort uint16) error {
+	theHostname := sql.NullString{}
+	theSrcPort := sql.NullInt32{}
+	theDstPort := sql.NullInt32{}
+	tx, err := model.pool.BeginTx(ctx, *model.txOpts)
+	if err != nil {
+
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, insertIntoIsps, srcIp); err != nil {
+
+		return err
+	}
+	if _, err := tx.Exec(ctx, insertIntoIsps, dstIp); err != nil {
+
+		return err
+	}
+	if _, err := tx.Exec(ctx, insertIntoHostnames, hostname); err != nil {
+
+		return err
+	}
+
+	if hostname != "" {
+
+		if _, err := tx.Exec(ctx, insertIntoIpsHostnames, dstIp, hostname); err != nil {
+
+			return err
+		}
+		theHostname = sql.NullString{
+			String: hostname,
+			Valid:  true,
+		}
+	}
+
+	if srcPort != 0 {
+
+		if _, err := tx.Exec(ctx, insertIntoPorts, srcPort); err != nil {
+
+			return err
+		}
+		theSrcPort = sql.NullInt32{
+			Int32: int32(srcPort),
+			Valid: true,
+		}
+
+		if _, err := tx.Exec(ctx, insertIntoIpsPorts, srcIp, srcPort); err != nil {
+
+			return err
+		}
+	}
+
+	if dstPort != 0 {
+
+		if _, err := tx.Exec(ctx, insertIntoPorts, dstPort); err != nil {
+
+			return err
+		}
+		theDstPort = sql.NullInt32{
+			Int32: int32(dstPort),
+			Valid: true,
+		}
+
+		if _, err := tx.Exec(ctx, insertIntoIpsPorts, dstIp, dstPort); err != nil {
+
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, insertIntoSubjects, srcIp, dstIp); err != nil {
+
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, insertIntoActions, srcIp, dstIp, theHostname, theSrcPort, theDstPort); err != nil {
+
+		return err
 	}
 
 	tx.Commit(ctx)
