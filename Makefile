@@ -4,7 +4,7 @@ LIBPCAP := 1.10.1
 BUILDARCH := $(shell uname -m)
 GCC := $(OUT)/$(BUILDARCH)-linux-musl-cross/bin/$(BUILDARCH)-linux-musl-gcc
 LD := $(OUT)/$(BUILDARCH)-linux-musl-cross/bin/$(BUILDARCH)-linux-musl-ld
-VERSION := 2.0.10
+VERSION := 2.0.11
 
 include LOCAL_ENV
 
