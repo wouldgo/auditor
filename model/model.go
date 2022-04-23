@@ -140,6 +140,21 @@ var (
 		"WHERE src_ip = $1",
 		"  AND dst_ip = $2",
 	}[:], " ")
+	insertIfIpIsCdn = strings.Join([]string{
+		"WITH the_cdn AS (",
+		" 	INSERT INTO network.cdns(cdn)",
+		" 	VALUES ($1)",
+		" 	ON CONFLICT ON CONSTRAINT cdns_pkey",
+		" 	DO UPDATE SET create_date=CURRENT_TIMESTAMP",
+		" 	RETURNING cdn",
+		")",
+		"UPDATE network.ips",
+		"SET",
+		"	 is_cdn=TRUE,",
+		"	 cdn_fk=tc.cdn",
+		"FROM the_cdn AS tc",
+		"WHERE ip=$2",
+	}[:], " ")
 )
 
 type PostgresqlConfigurations struct {
@@ -161,6 +176,8 @@ type MetaResult struct {
 	Organization    *string
 	Ports           *[]int
 	Vulnerabilities *[]string
+	IsCdn           *bool
+	Cdn             *string
 }
 
 type Model struct {
@@ -459,6 +476,23 @@ func (model *Model) Store(ctx context.Context, ip string, metaResult *MetaResult
 		} else {
 
 			model.logger.Debug("Could not insert vulnerabilities")
+		}
+
+		if metaResult.IsCdn != nil && metaResult.Cdn != nil {
+
+			if *metaResult.IsCdn {
+
+				if _, err := tx.Exec(ctx, insertIfIpIsCdn, *metaResult.Cdn, ip); err != nil {
+
+					return err
+				}
+			} else {
+
+				model.logger.Debugf("%s is not a cdn", ip)
+			}
+		} else {
+
+			model.logger.Debug("Could not insert isCdn")
 		}
 	} else {
 

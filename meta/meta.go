@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ns3777k/go-shodan/v4/shodan"
+	"github.com/projectdiscovery/cdncheck"
 )
 
 type MetaConfiguration struct {
@@ -32,10 +33,12 @@ type Meta struct {
 	locale                    *string
 	shodanClient              *shodan.Client
 	shodanHostServicesOptions *shodan.HostServicesOptions
-	model                     *model.Model
-	tickersDone               chan bool
-	cachePurgeTicker          *time.Ticker
-	printCacheInfoTicker      *time.Ticker
+	cdncheck                  *cdncheck.Client
+
+	model                *model.Model
+	tickersDone          chan bool
+	cachePurgeTicker     *time.Ticker
+	printCacheInfoTicker *time.Ticker
 }
 
 type MetaInput struct {
@@ -107,6 +110,12 @@ func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 		hostnames = host.Hostnames
 	}
 
+	isCdn, cdnOrigin, cdnCheckErr := meta.cdncheck.Check(ipAddr)
+	if cdnCheckErr != nil {
+		meta.log.Warnf("Error checking cdn for %v", stringIp)
+
+		return nil, err
+	}
 	isp := strings.ToLower(host.ISP)
 	city := strings.ToLower(host.City)
 	countryCode := strings.ToLower(host.CountryCode)
@@ -122,6 +131,8 @@ func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 		Organization:    &organization,
 		Ports:           &ports,
 		Vulnerabilities: &vulnerabilities,
+		IsCdn:           &isCdn,
+		Cdn:             &cdnOrigin,
 	}
 
 	meta.cache.Add(stringIp, toReturn)
@@ -191,6 +202,12 @@ func New(logger *zap.SugaredLogger, metaConfs *MetaConfiguration) (*Meta, error)
 		return nil, cacheCreateErr
 	}
 
+	client, err := cdncheck.NewWithCache()
+
+	if err != nil {
+		return nil, err
+	}
+
 	toReturn := &Meta{
 		log:          logger,
 		cache:        cache,
@@ -200,6 +217,7 @@ func New(logger *zap.SugaredLogger, metaConfs *MetaConfiguration) (*Meta, error)
 			History: false,
 			Minify:  true,
 		},
+		cdncheck: client,
 		resolver: &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
