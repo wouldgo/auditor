@@ -22,26 +22,26 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	meta, metaErr := meta.New(options.Log, options.Meta)
+	meta, metaErr := meta.New(options.Logger, options.Meta)
 	if metaErr != nil {
-		options.Log.Fatal(metaErr)
+		options.Logger.Log.Fatal(metaErr)
 	}
 
-	sniHandler, sniErr := sni.New(options.Log, options.Pcap)
+	sniHandler, sniErr := sni.New(options.Logger, options.Pcap)
 	if sniErr != nil {
-		options.Log.Fatal(sniErr)
+		options.Logger.Log.Fatal(sniErr)
 	}
 
 	go sniHandler.Handle()
 	go meta.FromChan(sniHandler.C)
-	go healthiness.Healthiness(options.Log)
+	go healthiness.Healthiness(options.Logger)
 	sig := <-stop
-	options.Log.Infof("Caught %v", sig)
+	options.Logger.Log.Infof("Caught %v", sig)
 
 	sniHandler.Close()
-	options.Log.Debug("Sni handler closed")
+	options.Logger.Log.Debug("Sni handler closed")
 
 	meta.Dispose()
-	options.Log.Debug("Meta disposed")
+	options.Logger.Log.Debug("Meta disposed")
 	os.Exit(0)
 }

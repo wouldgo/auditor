@@ -1,31 +1,35 @@
 package sni
 
 import (
-	"auditor/meta"
+	"auditor/model"
 	"fmt"
+	"strconv"
+	"sync"
 
-	"github.com/bradleyfalzon/tlsx"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"go.uber.org/zap"
+	"github.com/yarochewsky/tlsx"
+
+	logFacility "auditor/logger"
 )
 
 type PcapConfiguration struct {
 	Interface *string
+	Filter    *string
 }
 
 type Handler struct {
-	logger      *zap.SugaredLogger
+	logger      *logFacility.Logger
 	pcapHandler *pcap.Handle
 
-	C chan *meta.MetaInput
+	C chan *model.Action
 }
 
-func New(logger *zap.SugaredLogger, pcapConfs *PcapConfiguration) (*Handler, error) {
+func New(logger *logFacility.Logger, pcapConfs *PcapConfiguration) (*Handler, error) {
 	toReturn := &Handler{
 		logger: logger,
-		C:      make(chan *meta.MetaInput),
+		C:      make(chan *model.Action),
 	}
 
 	handler, err := pcap.OpenLive(*pcapConfs.Interface, 65536, true, pcap.BlockForever)
@@ -34,7 +38,7 @@ func New(logger *zap.SugaredLogger, pcapConfs *PcapConfiguration) (*Handler, err
 		return nil, err
 	}
 
-	if err := handler.SetBPFFilter("(dst port 443)"); err != nil {
+	if err := handler.SetBPFFilter(*pcapConfs.Filter); err != nil {
 
 		return nil, err
 	}
@@ -45,110 +49,73 @@ func New(logger *zap.SugaredLogger, pcapConfs *PcapConfiguration) (*Handler, err
 }
 
 func (h *Handler) Close() {
-	h.logger.Info("Closing sni")
+	h.logger.Log.Info("Closing sni")
 	h.pcapHandler.Close()
-	h.logger.Debug("Sni closed")
+	h.logger.Log.Debug("Sni closed")
 }
 
 func (h *Handler) Handle() {
 	source := gopacket.NewPacketSource(h.pcapHandler, h.pcapHandler.LinkType())
 
+	var wg sync.WaitGroup
+
 	for packet := range source.Packets() {
-		h.logger.Debug("Got data")
-
-		err := h.managePacket(packet)
-		if err != nil {
-
-			h.logger.Warn(err)
-		}
+		h.logger.Log.Debug("Got data")
+		wg.Add(1)
+		go h.managePacket(packet, &wg)
 	}
+	wg.Wait()
 }
 
-func (h *Handler) managePacket(packet gopacket.Packet) error {
-	srcAddr := "N/A"
-	dstAddr := "N/A"
-	var srcPort, dstPort uint16
-	hostName := "N/A"
-
-	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-		ipPacket, ok := ipLayer.(*layers.IPv4)
-		if !ok {
-			return fmt.Errorf("could not decode IP layer")
-		}
-		dstIpStr := ipPacket.DstIP.String()
-		srcIpStr := ipPacket.SrcIP.String()
-
-		dstAddr = dstIpStr
-		srcAddr = srcIpStr
-	}
-
+func (h *Handler) managePacket(packet gopacket.Packet, wg *sync.WaitGroup) {
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		// cast TCP layer
 		tcp, ok := tcpLayer.(*layers.TCP)
 		if !ok {
-			return fmt.Errorf("could not decode TCP layer")
+			h.logger.Log.Error("Could not decode TCP layer")
 		}
 
-		if tcp.SYN {
-			h.logger.Debug("Connection setup")
-		} else if tcp.FIN {
-			h.logger.Debug("Connection teardown")
-		} else if tcp.ACK && len(tcp.LayerPayload()) == 0 {
-			h.logger.Debug("Acknowledgement")
-		} else if tcp.RST {
-			h.logger.Debug("RST")
+		if tcp.SYN { // Connection setup
+		} else if tcp.FIN { // Connection teardown
+		} else if tcp.ACK && len(tcp.LayerPayload()) == 0 { // Acknowledgement packet
+		} else if tcp.RST { // Unexpected packet
 		} else {
 			// data packet
-			sniData, err := h.readData(packet)
-			if err != nil {
-				return err
+			// process TLS client hello
+			clientHello := tlsx.GetClientHello(packet)
+			if clientHello != nil {
+				srcPortUi64, err := strconv.ParseUint(packet.TransportLayer().TransportFlow().Src().String(), 10, 64)
+				if err != nil {
+					h.logger.Log.Errorf("src port not a number")
+					return
+				}
+
+				dstPortUi64, err := strconv.ParseUint(packet.TransportLayer().TransportFlow().Dst().String(), 10, 64)
+				if err != nil {
+					h.logger.Log.Errorf("dst port not a number")
+					return
+				}
+
+				srcAddr := packet.NetworkLayer().NetworkFlow().Src().String()
+				dstAddr := packet.NetworkLayer().NetworkFlow().Dst().String()
+				srcPort := uint16(srcPortUi64)
+				dstPort := uint16(dstPortUi64)
+				hostName := clientHello.SNI
+
+				source := fmt.Sprintf("%s:%d", srcAddr, srcPort)
+				destination := fmt.Sprintf("%s:%d", dstAddr, dstPort)
+
+				h.logger.Log.Debugf("[ %s -> %s ] | %s", source, destination, hostName)
+
+				h.C <- &model.Action{
+					SrcAddr:  &srcAddr,
+					DstAddr:  &dstAddr,
+					SrcPort:  &srcPort,
+					DstPort:  &dstPort,
+					Hostname: &hostName,
+				}
 			}
-			hostName = *sniData.sni
-
-			srcPort = uint16(*sniData.srcPort)
-			dstPort = uint16(*sniData.dstPort)
 		}
 	}
-
-	if hostName != "N/A" {
-		h.logger.Debugf("Got data from %s:%s to %s:%s resolving %s", srcAddr, srcPort, dstAddr, dstPort, hostName)
-
-		h.C <- &meta.MetaInput{
-			SrcAddr:  srcAddr,
-			DstAddr:  dstAddr,
-			SrcPort:  srcPort,
-			DstPort:  dstPort,
-			Hostname: hostName,
-		}
-	}
-
-	return nil
-}
-
-func (h *Handler) readData(packet gopacket.Packet) (*sniTCPData, error) {
-	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		t, _ := tcpLayer.(*layers.TCP)
-
-		var hello = tlsx.ClientHello{}
-
-		err := hello.Unmarshall(t.LayerPayload())
-
-		if err != nil {
-			return nil, err
-		}
-
-		h.logger.Debugf("Client hello from port %s to %s", t.SrcPort, t.DstPort)
-		return &sniTCPData{
-			sni:     &hello.SNI,
-			srcPort: &t.SrcPort,
-			dstPort: &t.DstPort,
-		}, nil
-	} else {
-		return nil, fmt.Errorf("client Hello Reader could not decode TCP layer")
-	}
-}
-
-type sniTCPData struct {
-	sni     *string
-	srcPort *layers.TCPPort
-	dstPort *layers.TCPPort
+	wg.Done()
 }

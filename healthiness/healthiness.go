@@ -3,20 +3,19 @@ package healthiness
 import (
 	"net/http"
 
-	"github.com/gorilla/mux"
-	"go.uber.org/zap"
+	logFacility "auditor/logger"
 )
 
 func dumbHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func Healthiness(logger *zap.SugaredLogger) {
-	router := mux.NewRouter()
+func Healthiness(logger *logFacility.Logger) {
+	router := http.NewServeMux()
 
-	router.Path("/live").HandlerFunc(dumbHandler)
-	router.Path("/ready").HandlerFunc(dumbHandler)
-	logger.Info("Starting healthiness metrics server on port 8080")
+	router.HandleFunc("/live", dumbHandler)
+	router.HandleFunc("/ready", dumbHandler)
+	logger.Log.Info("Starting healthiness metrics server on port 8080")
 	err := http.ListenAndServe(":8080", router)
 	if err != nil {
 		panic(err)

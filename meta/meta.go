@@ -1,6 +1,7 @@
 package meta
 
 import (
+	logFacility "auditor/logger"
 	"auditor/model"
 	"context"
 	"errors"
@@ -9,14 +10,13 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	"go.uber.org/zap"
 
 	"github.com/ns3777k/go-shodan/v4/shodan"
 	"github.com/projectdiscovery/cdncheck"
 )
 
 type MetaConfiguration struct {
-	PostgresqlConfigurations *model.PostgresqlConfigurations
+	ModelConfigurations *model.ModelConfigurations
 
 	ShodanApiKey *string
 
@@ -28,7 +28,7 @@ type MetaConfiguration struct {
 
 type Meta struct {
 	resolver                  *net.Resolver
-	log                       *zap.SugaredLogger
+	log                       *logFacility.Logger
 	cache                     *lru.ARCCache
 	locale                    *string
 	shodanClient              *shodan.Client
@@ -41,25 +41,17 @@ type Meta struct {
 	printCacheInfoTicker *time.Ticker
 }
 
-type MetaInput struct {
-	SrcAddr  string
-	DstAddr  string
-	Hostname string
-	SrcPort  uint16
-	DstPort  uint16
-}
-
-func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
+func (meta *Meta) fromIp(ipAddr net.IP) (*model.Meta, error) {
 	stringIp := ipAddr.String()
 	value, isCached := meta.cache.Get(stringIp)
 	if isCached {
 
-		return value.(*model.MetaResult), nil
+		return value.(*model.Meta), nil
 	}
 
 	dns, err := meta.resolver.LookupAddr(context.Background(), stringIp)
 	if err != nil || len(dns) == 0 {
-		meta.log.Warnf("Error looking up %v", stringIp)
+		meta.log.Log.Warnf("Error looking up %v", stringIp)
 	}
 
 	names := make([]string, 0)
@@ -74,33 +66,22 @@ func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 
 	hostnames := names
 	if isLocal {
-		meta.log.Infof("%v is a local address", hostnames)
+		meta.log.Log.Infof("%v is a local address", hostnames)
 
-		toReturn := &model.MetaResult{
+		toReturn := &model.Meta{
 			Hostnames: hostnames,
 		}
 		meta.cache.Add(stringIp, toReturn)
-		err = meta.model.Store(context.Background(), stringIp, toReturn)
+		err = meta.model.StoreMeta(stringIp, toReturn)
 		if err != nil {
-			meta.log.Warn(err)
+			meta.log.Log.Warn(err)
 		}
 		return toReturn, nil
 	}
 
-	exists, err := meta.model.Exists(context.Background(), stringIp)
-	if err != nil {
-		return nil, err
-	}
-
-	if exists { //XXX QUI METTICI IL CERVELLO
-		meta.log.Debugf("%v is already in the database", stringIp)
-
-		return nil, nil
-	}
-
 	host, err := meta.shodanClient.GetServicesForHost(context.Background(), stringIp, meta.shodanHostServicesOptions)
 	if err != nil {
-		meta.log.Warnf("Error getting services for %v", stringIp)
+		meta.log.Log.Warnf("Error getting services for %v", stringIp)
 
 		return nil, err
 	}
@@ -112,7 +93,7 @@ func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 
 	isCdn, cdnOrigin, cdnCheckErr := meta.cdncheck.Check(ipAddr)
 	if cdnCheckErr != nil {
-		meta.log.Warnf("Error checking cdn for %v", stringIp)
+		meta.log.Log.Warnf("Error checking cdn for %v", stringIp)
 
 		return nil, err
 	}
@@ -123,27 +104,27 @@ func (meta *Meta) fromIp(ipAddr net.IP) (*model.MetaResult, error) {
 	ports := host.Ports
 	vulnerabilities := host.Vulnerabilities
 
-	toReturn := &model.MetaResult{
+	toReturn := &model.Meta{
 		Hostnames:       hostnames,
 		Isp:             &isp,
 		City:            &city,
 		Country:         &countryCode,
 		Organization:    &organization,
-		Ports:           &ports,
-		Vulnerabilities: &vulnerabilities,
+		Ports:           ports,
+		Vulnerabilities: vulnerabilities,
 		IsCdn:           &isCdn,
 		Cdn:             &cdnOrigin,
 	}
 
 	meta.cache.Add(stringIp, toReturn)
-	err = meta.model.Store(context.Background(), stringIp, toReturn)
+	err = meta.model.StoreMeta(stringIp, toReturn)
 	if err != nil {
-		meta.log.Warn(err)
+		meta.log.Log.Warn(err)
 	}
 	return toReturn, nil
 }
 
-func (meta *Meta) fromString(ipAddr string) (*model.MetaResult, error) {
+func (meta *Meta) fromString(ipAddr string) (*model.Meta, error) {
 	ip := net.ParseIP(ipAddr)
 	if ip == nil {
 		return nil, errors.New("Address " + ipAddr + " is not valid")
@@ -156,29 +137,22 @@ func (meta *Meta) fromString(ipAddr string) (*model.MetaResult, error) {
 	return thisMeta, nil
 }
 
-func (meta *Meta) FromChan(metaChan chan *MetaInput) {
-	aContext := context.Background()
+func (meta *Meta) FromChan(metaChan chan *model.Action) {
 	for aMetaInput := range metaChan {
 
-		if _, srcAddrErr := meta.fromString(aMetaInput.SrcAddr); srcAddrErr != nil {
+		if _, srcAddrErr := meta.fromString(*aMetaInput.SrcAddr); srcAddrErr != nil {
 
-			meta.log.Warn(srcAddrErr)
+			meta.log.Log.Warn(srcAddrErr)
 		}
 
-		if _, dstsrcAddrErr := meta.fromString(aMetaInput.DstAddr); dstsrcAddrErr != nil {
+		if _, dstsrcAddrErr := meta.fromString(*aMetaInput.DstAddr); dstsrcAddrErr != nil {
 
-			meta.log.Warn(dstsrcAddrErr)
+			meta.log.Log.Warn(dstsrcAddrErr)
 		}
 
-		if err := meta.model.Action(aContext,
-			aMetaInput.SrcAddr,
-			aMetaInput.DstAddr,
-			aMetaInput.Hostname,
-			aMetaInput.SrcPort,
-			aMetaInput.DstPort,
-		); err != nil {
+		if err := meta.model.StoreAction(aMetaInput); err != nil {
 
-			meta.log.Warn(err)
+			meta.log.Log.Warn(err)
 		}
 	}
 }
@@ -190,8 +164,8 @@ func (meta *Meta) Dispose() {
 	meta.printCacheInfoTicker.Stop()
 }
 
-func New(logger *zap.SugaredLogger, metaConfs *MetaConfiguration) (*Meta, error) {
-	model, err := model.New(logger, context.Background(), metaConfs.PostgresqlConfigurations)
+func New(logger *logFacility.Logger, metaConfs *MetaConfiguration) (*Meta, error) {
+	model, err := model.New(logger, context.Background(), metaConfs.ModelConfigurations)
 	if err != nil {
 		return nil, err
 	}
@@ -244,9 +218,9 @@ func (m *Meta) cachePurge() {
 		case <-m.tickersDone:
 			return
 		case _ = <-m.cachePurgeTicker.C:
-			m.log.Debugf("Cache evictor started")
+			m.log.Log.Debugf("Cache evictor started")
 			m.cache.Purge()
-			m.log.Debugf("Cache is purged")
+			m.log.Log.Debugf("Cache is purged")
 		}
 	}
 }
@@ -258,7 +232,7 @@ func (m *Meta) printCacheInfo() {
 			return
 		case _ = <-m.printCacheInfoTicker.C:
 			cachedEntries := m.cache.Len()
-			m.log.Debugf("Cached entries are %v", cachedEntries)
+			m.log.Log.Debugf("Cached entries are %v", cachedEntries)
 		}
 	}
 }

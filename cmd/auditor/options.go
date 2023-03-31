@@ -25,7 +25,7 @@ var (
 	format                  = flag.String("format", "format", "Formatter to use: take a look at https://github.com/netsampler/goflow2/tree/main/format")
 
 	transportEnv, transportEnvSet = os.LookupEnv("NFLOW_TRANSPORT")
-	transport                     = flag.String("transport", "prometheus", "Transport to use: take a look at https://github.com/netsampler/goflow2/tree/main/transport")
+	transport                     = flag.String("transport", "to-channel", "Transport to use: take a look at https://github.com/netsampler/goflow2/tree/main/transport")
 
 	workersEnv, workersEnvSet = os.LookupEnv("NFLOW_WORKERS")
 	workers                   = flag.Int("workers", 1, "Number of nflow ingestion workers")
@@ -99,6 +99,9 @@ func parseOptions() (*Options, error) {
 	}
 
 	nFlowConf := &handling.NflowConfiguration{
+		Format:    format,
+		Transport: transport,
+
 		Workers:    workers,
 		Hostname:   &hostname,
 		Port:       &port,

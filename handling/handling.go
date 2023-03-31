@@ -1,7 +1,8 @@
 package handling
 
 import (
-	"auditor/meta"
+	logFacility "auditor/logger"
+	"auditor/model"
 	"context"
 	"net"
 
@@ -13,6 +14,9 @@ import (
 )
 
 type NflowConfiguration struct {
+	Transport *string
+	Format    *string
+
 	Workers    *int
 	Hostname   *string
 	Port       *uint64
@@ -22,7 +26,7 @@ type NflowConfiguration struct {
 
 type Handler struct {
 	logger      *zap.SugaredLogger
-	Actions     chan *meta.MetaInput
+	Actions     chan *model.Action
 	hostname    string
 	port        int
 	workers     int
@@ -30,23 +34,23 @@ type Handler struct {
 	transporter *transport.Transport
 }
 
-func New(ctx context.Context, logger *zap.SugaredLogger, nflowConf *NflowConfiguration) (*Handler, error) {
-	logger.Info("Initializing handler")
-	formatter, err := format.FindFormat(ctx, "format")
+func New(ctx context.Context, logger *logFacility.Logger, nflowConf *NflowConfiguration) (*Handler, error) {
+	logger.Log.Info("Initializing handler")
+	formatter, err := format.FindFormat(ctx, *nflowConf.Format)
 	if err != nil {
 		return nil, err
 	}
-	logger.Debug("Found format")
-	transporter, err := transport.FindTransport(ctx, "to-channel")
+	logger.Log.Debug("Found format")
+	transporter, err := transport.FindTransport(ctx, *nflowConf.Transport)
 	if err != nil {
 		return nil, err
 	}
-	logger.Debugf("Found transport")
+	logger.Log.Debugf("Found transport")
 
 	port := int(*nflowConf.Port)
 
 	return &Handler{
-		logger:      logger,
+		logger:      logger.Log,
 		Actions:     promDriverChannel(),
 		hostname:    *nflowConf.Hostname,
 		port:        port,

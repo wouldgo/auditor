@@ -1,589 +1,421 @@
 package model
 
 import (
+	"bytes"
 	"context"
-	"database/sql"
-	"embed"
-	"errors"
+	"encoding/gob"
 	"fmt"
-	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	migrate "github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/source/httpfs"
+	badger "github.com/dgraph-io/badger/v4"
 
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
-	"go.uber.org/zap"
+	logFacility "auditor/logger"
 )
 
-//go:embed _migrations/*.sql
-var migrations embed.FS
-
-var (
-	selectFromIps = strings.Join([]string{
-		"SELECT i.ip::text",
-		"FROM network.ips AS i",
-		"WHERE i.ip = $1",
-	}[:], " ")
-	insertIntoTraffic = strings.Join([]string{
-		"INSERT INTO network.ips(",
-		"  ip",
-		")",
-		"VALUES($1)",
-		"ON CONFLICT ON CONSTRAINT ips_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoHostnames = strings.Join([]string{
-		"INSERT INTO network.hostnames(",
-		"  hostname",
-		")",
-		"VALUES($1)",
-		"ON CONFLICT ON CONSTRAINT hostnames_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIpsHostnames = strings.Join([]string{
-		"INSERT INTO network.ips_hostnames(",
-		"  ip, hostname",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT ips_hostnames_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoLocations = strings.Join([]string{
-		"INSERT INTO network.locations(",
-		"  city, country",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT locations_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIpsLocations = strings.Join([]string{
-		"INSERT INTO network.ips_locations(",
-		"  ip, location_fk",
-		")",
-		"SELECT $1, id",
-		"FROM network.locations",
-		"WHERE city = $2",
-		"  AND country = $3",
-		"ON CONFLICT ON CONSTRAINT ips_locations_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoPorts = strings.Join([]string{
-		"INSERT INTO network.ports(",
-		"  port",
-		")",
-		"VALUES($1)",
-		"ON CONFLICT ON CONSTRAINT ports_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIpsPorts = strings.Join([]string{
-		"INSERT INTO network.ips_ports(",
-		"  ip, port",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT ips_ports_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIsps = strings.Join([]string{
-		"INSERT INTO network.isps(",
-		"  isp",
-		")",
-		"VALUES($1)",
-		"ON CONFLICT ON CONSTRAINT isps_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIpsIsps = strings.Join([]string{
-		"INSERT INTO network.ips_isps(",
-		"  ip, isp",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT ips_isps_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoVulns = strings.Join([]string{
-		"INSERT INTO network.vulns(",
-		"  type",
-		")",
-		"VALUES($1)",
-		"ON CONFLICT ON CONSTRAINT vulns_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoIpsVulns = strings.Join([]string{
-		"INSERT INTO network.ips_vulns(",
-		"  ip, type",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT ips_vulns_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoSubjects = strings.Join([]string{
-		"INSERT INTO network.subjects(",
-		"  src_ip, dst_ip",
-		")",
-		"VALUES($1, $2)",
-		"ON CONFLICT ON CONSTRAINT subjects_pkey",
-		"DO NOTHING",
-	}[:], " ")
-	insertIntoActions = strings.Join([]string{
-		"INSERT INTO network.actions(",
-		"  subject_fk, hostname, src_port, dst_port",
-		")",
-		"SELECT ",
-		"  id AS subject_fk,",
-		"  $3 AS hostname,",
-		"  $4 AS src_port,",
-		"  $5 AS dst_port",
-		"FROM network.subjects",
-		"WHERE src_ip = $1",
-		"  AND dst_ip = $2",
-	}[:], " ")
-	insertIfIpIsCdn = strings.Join([]string{
-		"WITH the_cdn AS (",
-		" 	INSERT INTO network.cdns(cdn)",
-		" 	VALUES ($1)",
-		" 	ON CONFLICT ON CONSTRAINT cdns_pkey",
-		" 	DO UPDATE SET create_date=CURRENT_TIMESTAMP",
-		" 	RETURNING cdn",
-		")",
-		"UPDATE network.ips",
-		"SET",
-		"	 is_cdn=TRUE,",
-		"	 cdn_fk=tc.cdn",
-		"FROM the_cdn AS tc",
-		"WHERE ip=$2",
-	}[:], " ")
-)
-
-type PostgresqlConfigurations struct {
-	Administrator         *string
-	AdministratorPassword *string
-	Host                  *string
-	Username              *string
-	Password              *string
-	Database              *string
-	Threads               *int
-	ApplicationName       string
+type ModelConfigurations struct {
+	PathWhereStoreDabaseFile *string
+	ApplicationName          *string
+	ModelMergersTime         time.Duration
 }
 
-type MetaResult struct {
+type Meta struct {
 	Hostnames       []string
 	Isp             *string
 	City            *string
 	Country         *string
 	Organization    *string
-	Ports           *[]int
-	Vulnerabilities *[]string
+	Ports           []int
+	Vulnerabilities []string
 	IsCdn           *bool
 	Cdn             *string
 }
 
+type Action struct {
+	SrcAddr  *string
+	DstAddr  *string
+	Hostname *string
+	SrcPort  *uint16
+	DstPort  *uint16
+}
+
+type PortTraffic struct {
+	srcPort   *uint16
+	dstPort   *uint16
+	hostnames []string
+}
+
+type ActionsByIp struct {
+	ip          *string
+	portTraffic *PortTraffic
+}
+
 type Model struct {
-	logger          *zap.SugaredLogger
-	keepAliveTicker *time.Ticker
-	keepAliveDone   chan bool
+	logger *logFacility.Logger
 
-	connectionString         string
-	postgresqlConfigurations *PostgresqlConfigurations
-	pool                     *pgxpool.Pool
-	txOpts                   *pgx.TxOptions
+	garbageCollectionTicker     *time.Ticker
+	garbageCollectionTickerDone chan bool
+
+	tickersDone chan bool
+
+	configuration *ModelConfigurations
+	db            *badger.DB
+
+	metaMutex    *sync.RWMutex
+	actionsMutex *sync.RWMutex
+
+	metaMerger    map[string]*badger.MergeOperator
+	actionsMerger map[string]*badger.MergeOperator
+	ipsMerger     *badger.MergeOperator
 }
 
-func setupDatabase(username, password, database string) (string, error) {
+func New(logger *logFacility.Logger, ctx context.Context, modelConfigurations *ModelConfigurations) (*Model, error) {
+	logger.Log.Debug("Creating data facility")
 
-	//TODO sanitize
-	sqlComment := "--"
-	if strings.Contains(username, sqlComment) ||
-		strings.Contains(password, sqlComment) ||
-		strings.Contains(database, sqlComment) {
-		return " ", errors.New("invalid characters in username, password or database")
+	databaseLocation := fmt.Sprintf("%s/%s.data", *modelConfigurations.PathWhereStoreDabaseFile, *modelConfigurations.ApplicationName)
+	badgerOptions := logger.Level.ToBadger(badger.DefaultOptions(databaseLocation), logger)
+	db, err := badger.Open(badgerOptions)
+	if err != nil {
+		return nil, err
 	}
 
-	return strings.Join([]string{
-		"DO",
-		"$do$",
-		"BEGIN",
-		"  IF (",
-		"    SELECT COUNT(*)",
-		"    FROM pg_catalog.pg_user",
-		"    WHERE usename = '" + username + "'",
-		"  ) = 0 THEN",
-		"    CREATE ROLE \"" + username + "\" LOGIN PASSWORD '" + password + "';",
-		"  END IF;",
-		"END",
-		"$do$;",
-		"CREATE SCHEMA IF NOT EXISTS network AUTHORIZATION \"" + username + "\";",
-		"GRANT CONNECT ON DATABASE \"" + database + "\" TO \"" + username + "\";",
-		"GRANT USAGE ON ALL SEQUENCES IN SCHEMA network TO \"" + username + "\";",
-		"GRANT CREATE ON SCHEMA network TO \"" + username + "\";",
-		"GRANT SELECT, INSERT, UPDATE, REFERENCES ON ALL TABLES IN SCHEMA network TO \"" + username + "\";",
-		"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO \"" + username + "\";",
-		"GRANT USAGE ON SCHEMA public TO \"" + username + "\";",
-		"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA network TO \"" + username + "\";",
-		"GRANT USAGE ON SCHEMA network TO \"" + username + "\";",
-	}[:], " "), nil
+	toReturn := &Model{
+		logger: logger,
+
+		garbageCollectionTicker:     time.NewTicker(2 * time.Minute),
+		garbageCollectionTickerDone: make(chan bool),
+
+		tickersDone: make(chan bool),
+
+		configuration: modelConfigurations,
+		db:            db,
+
+		metaMutex:    &sync.RWMutex{},
+		actionsMutex: &sync.RWMutex{},
+
+		metaMerger:    make(map[string]*badger.MergeOperator),
+		actionsMerger: make(map[string]*badger.MergeOperator),
+	}
+
+	toReturn.ipsMerger = db.GetMergeOperator(ipsKey(), toReturn.mergeIps, modelConfigurations.ModelMergersTime)
+
+	go toReturn.gc()
+
+	return toReturn, nil
 }
 
-func (m *Model) migrate(ctx context.Context) error {
-	adminConn, err := pgx.Connect(ctx, fmt.Sprintf(strings.Join([]string{
-		"postgres://%s:%s@%s:5432/%s?",
-		"application_name=%s",
-		"&connect_timeout=20",
-	}[:], ""),
-		*m.postgresqlConfigurations.Administrator,
-		*m.postgresqlConfigurations.AdministratorPassword,
-		*m.postgresqlConfigurations.Host,
-		*m.postgresqlConfigurations.Database,
-		m.postgresqlConfigurations.ApplicationName+"-admin",
-	))
+func (model *Model) Dispose() error {
+	model.logger.Log.Debug("Closing data structure")
+	model.tickersDone <- true
+	model.garbageCollectionTicker.Stop()
+
+	for ip, value := range model.metaMerger {
+		model.logger.Log.Debugf("Stopping meta merger for %s", ip)
+		value.Stop()
+	}
+
+	err := model.db.Close()
 	if err != nil {
-		return err
-	}
-
-	defer adminConn.Close(ctx)
-
-	sourceInstance, err := httpfs.New(http.FS(migrations), "_migrations")
-	if err != nil {
-		return err
-	}
-	migrator, err := migrate.NewWithSourceInstance("httpfs", sourceInstance, fmt.Sprintf(strings.Join([]string{
-		"postgres://%s:%s@%s:5432/%s?",
-		"application_name=%s",
-		"&connect_timeout=20",
-		"&sslmode=disable",
-	}[:], ""),
-		*m.postgresqlConfigurations.Administrator,
-		*m.postgresqlConfigurations.AdministratorPassword,
-		*m.postgresqlConfigurations.Host,
-		*m.postgresqlConfigurations.Database,
-		m.postgresqlConfigurations.ApplicationName,
-	))
-	if err != nil {
-		return err
-	}
-
-	setupDatabaseStr, err := setupDatabase(*m.postgresqlConfigurations.Username,
-		*m.postgresqlConfigurations.Password, *m.postgresqlConfigurations.Database)
-	if err != nil {
-		return err
-	}
-
-	_, err = adminConn.Exec(ctx, setupDatabaseStr)
-	if err != nil {
-		return err
-	}
-
-	if err := migrator.Up(); errors.Is(err, migrate.ErrNoChange) {
-		m.logger.Info(err)
-	} else if err != nil {
 
 		return err
-	}
-
-	sourceErr, databaseErr := migrator.Close()
-	if sourceErr != nil {
-		return sourceErr
-	}
-
-	if databaseErr != nil {
-		return databaseErr
 	}
 
 	return nil
 }
 
-func New(logger *zap.SugaredLogger, ctx context.Context, postgresqlConfigurations *PostgresqlConfigurations) (*Model, error) {
-	toReturn := &Model{
-		postgresqlConfigurations: postgresqlConfigurations,
-		connectionString: fmt.Sprintf(strings.Join([]string{
-			"postgres://%s:%s@%s:5432/%s?",
-			"application_name=%s",
-			"&connect_timeout=20",
-			"&pool_max_conns=%d",
-			"&pool_min_conns=%d",
-		}[:], ""),
-			*postgresqlConfigurations.Username,
-			*postgresqlConfigurations.Password,
-			*postgresqlConfigurations.Host,
-			*postgresqlConfigurations.Database,
-			postgresqlConfigurations.ApplicationName,
-			*postgresqlConfigurations.Threads,
-			*postgresqlConfigurations.Threads,
-		),
-		txOpts: &pgx.TxOptions{
-			IsoLevel:       pgx.ReadUncommitted,
-			DeferrableMode: pgx.NotDeferrable,
-			AccessMode:     pgx.ReadWrite,
-		},
-		logger: logger,
-	}
+func (model *Model) Get() ([]string, error) {
+	var valCopy []byte
+	err := model.db.View(func(txn *badger.Txn) error {
+		item, innerError := txn.Get(ipsKey())
+		if innerError != nil {
+			return innerError
+		}
 
-	if err := toReturn.migrate(ctx); err != nil {
+		valCopy, innerError = item.ValueCopy(nil)
+		if innerError != nil {
+			return innerError
+		}
+
+		return nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
 
-	if err := toReturn.initPool(ctx); err != nil {
-		return nil, err
+	decodedMeta, decodeErr := decode[set](valCopy)
+	if decodeErr != nil {
+
+		return nil, decodeErr
+	}
+
+	toReturn := make([]string, 0, len(*decodedMeta))
+	for k := range *decodedMeta {
+		toReturn = append(toReturn, k)
 	}
 
 	return toReturn, nil
 }
 
-func (model *Model) Dispose() {
-	model.keepAliveDone <- true
-	model.keepAliveTicker.Stop()
+func (model *Model) GetMeta(ip string) (*Meta, error) {
+	var valCopy []byte
+	err := model.db.View(func(txn *badger.Txn) error {
+		item, innerError := txn.Get(metaKey(ip))
+		if innerError != nil {
+			return innerError
+		}
+
+		valCopy, innerError = item.ValueCopy(nil)
+		if innerError != nil {
+			return innerError
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	decodedMeta, decodeErr := decode[Meta](valCopy)
+	if decodeErr != nil {
+
+		return nil, decodeErr
+	}
+
+	return decodedMeta, nil
 }
 
-func (model *Model) keepAlive() {
+func (model *Model) GetActions(ip string) (*ActionsByIp, error) {
+	var valCopy []byte
+	err := model.db.View(func(txn *badger.Txn) error {
+		item, innerError := txn.Get(actionKey(ip))
+		if innerError != nil {
+			return innerError
+		}
+
+		valCopy, innerError = item.ValueCopy(nil)
+		if innerError != nil {
+			return innerError
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	decodedActions, decodeErr := decode[ActionsByIp](valCopy)
+	if decodeErr != nil {
+
+		return nil, decodeErr
+	}
+
+	return decodedActions, nil
+}
+
+func (model *Model) StoreMeta(ip string, meta *Meta) error {
+	var mergingOperator *badger.MergeOperator
+
+	model.metaMutex.Lock()
+	defer model.metaMutex.Unlock()
+	val, ok := model.metaMerger[ip]
+	if !ok {
+		mergingOperator = model.db.GetMergeOperator(metaKey(ip), model.mergeMeta, 100*time.Millisecond)
+		model.metaMerger[ip] = mergingOperator
+	} else {
+		mergingOperator = val
+	}
+
+	bytes, err := encode(*meta)
+	if err != nil {
+		return err
+	}
+	mergingOperator.Add(bytes)
+
+	return nil
+}
+
+func (model *Model) StoreAction(action *Action) error {
+	var scrMergingOperator, dstMergingOperator *badger.MergeOperator
+
+	hostnames := []string{*action.Hostname}[:]
+
+	model.actionsMutex.Lock()
+	defer model.actionsMutex.Unlock()
+	srcVal, srcMetaKeyIsPresent := model.actionsMerger[*action.SrcAddr]
+	if !srcMetaKeyIsPresent {
+		scrMergingOperator = model.db.GetMergeOperator(actionKey(*action.SrcAddr), model.mergeActions, 100*time.Millisecond)
+		model.metaMerger[*action.SrcAddr] = scrMergingOperator
+	} else {
+		scrMergingOperator = srcVal
+	}
+
+	srcActionsByIp := &ActionsByIp{
+		ip: action.SrcAddr,
+		portTraffic: &PortTraffic{
+			srcPort:   action.SrcPort,
+			dstPort:   action.DstPort,
+			hostnames: hostnames,
+		},
+	}
+
+	srcBytes, err := encode(*srcActionsByIp)
+	if err != nil {
+		return err
+	}
+
+	scrMergingOperator.Add(srcBytes)
+
+	dstVal, dstMetaKeyIsPresent := model.actionsMerger[*action.DstAddr]
+	if !dstMetaKeyIsPresent {
+		dstMergingOperator = model.db.GetMergeOperator(actionKey(*action.DstAddr), model.mergeActions, 100*time.Millisecond)
+		model.metaMerger[*action.DstAddr] = dstMergingOperator
+	} else {
+		dstMergingOperator = dstVal
+	}
+
+	dstActionsByIp := &ActionsByIp{
+		ip: action.DstAddr,
+		portTraffic: &PortTraffic{
+			srcPort:   action.DstPort,
+			dstPort:   action.SrcPort,
+			hostnames: hostnames,
+		},
+	}
+
+	dstBytes, err := encode(*dstActionsByIp)
+	if err != nil {
+		return err
+	}
+
+	dstMergingOperator.Add(dstBytes)
+
+	return nil
+}
+
+type set map[string]interface{}
+
+func (model *Model) gc() {
+	model.logger.Log.Debug("Garbage collection local database")
 	for {
 		select {
-		case <-model.keepAliveDone:
+		case <-model.tickersDone:
 			return
-		case _ = <-model.keepAliveTicker.C:
-			err := model.pool.Ping(context.Background())
+		case <-model.garbageCollectionTicker.C:
 
-			if err != nil {
-
-				panic(err)
+			err := model.db.RunValueLogGC(0.7)
+			if err != nil && err != badger.ErrNoRewrite {
+				model.logger.Log.Errorf("Garbage collection in error: %s", err.Error())
 			}
-
-			model.logger.Debug("connected to postgresql")
 		}
 	}
 }
 
-func (model *Model) initPool(ctx context.Context) error {
-	pool, err := pgxpool.Connect(ctx, model.connectionString)
-	if err != nil {
-		return err
+func (model *Model) mergeMeta(originalValue, newValue []byte) []byte {
+	model.logger.Log.Debugf("Merging meta values")
+	originalMeta, originalMetaErr := decode[Meta](originalValue)
+	newMeta, newMetaErr := decode[Meta](newValue)
+	if originalMetaErr != nil || newMetaErr != nil {
+		return originalValue
 	}
 
-	model.pool = pool
-	model.keepAliveTicker = time.NewTicker(time.Minute)
-	model.keepAliveDone = make(chan bool)
-	go model.keepAlive()
-	return nil
+	newPorts := append(originalMeta.Ports, newMeta.Ports...)
+	newHostnames := append(originalMeta.Hostnames, newMeta.Hostnames...)
+
+	originalMeta.Ports = newPorts
+	originalMeta.Hostnames = newHostnames
+
+	model.logger.Log.Debugf("Meta values merged, encoding now")
+	newBytes, encodingErr := encode(originalMeta)
+	if encodingErr != nil {
+		return originalValue
+	}
+	model.logger.Log.Debugf("Meta values encoded")
+
+	return newBytes
 }
 
-func (model *Model) Exists(ctx context.Context, ip string) (bool, error) {
-	var theIp string
-	err := model.pool.QueryRow(ctx, selectFromIps, ip).Scan(&theIp)
-	if err != nil && err.Error() == "no rows in result set" {
-		return false, nil
+func (model *Model) mergeActions(originalValue, newValue []byte) []byte {
+	model.logger.Log.Debugf("Merging actions values")
+	originalDecoded, originalDecodeErr := decode[ActionsByIp](originalValue)
+	newDecoded, newDecodeErr := decode[ActionsByIp](newValue)
+	if originalDecodeErr != nil || newDecodeErr != nil {
+		return originalValue
 	}
 
-	if err != nil {
-		return false, err
-	}
+	newHostnames := append(originalDecoded.portTraffic.hostnames, newDecoded.portTraffic.hostnames...)
+	originalDecoded.portTraffic.hostnames = newHostnames
 
-	if strings.EqualFold(theIp, ip) {
-		return true, nil
+	model.logger.Log.Debugf("Actions values merged, encoding now")
+	newBytes, encodingErr := encode(originalDecoded)
+	if encodingErr != nil {
+		return originalValue
 	}
+	model.logger.Log.Debugf("Action values encoded")
 
-	return false, nil
+	return newBytes
 }
 
-func (model *Model) Store(ctx context.Context, ip string, metaResult *MetaResult) error {
-	tx, err := model.pool.BeginTx(ctx, *model.txOpts)
-	if err != nil {
-
-		return err
+func (model *Model) mergeIps(originalValue, newValue []byte) []byte {
+	model.logger.Log.Debugf("Merging ips")
+	originalDecoded, originalDecodeErr := decode[set](originalValue)
+	newDecoded, newDecodeErr := decode[set](newValue)
+	if originalDecodeErr != nil || newDecodeErr != nil {
+		return originalValue
 	}
 
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, insertIntoTraffic, ip); err != nil {
-
-		return err
+	for k := range *newDecoded {
+		(*originalDecoded)[k] = struct{}{}
 	}
 
-	if metaResult != nil {
-		if metaResult.Hostnames != nil {
-			for _, anHostname := range metaResult.Hostnames {
-				if _, err := tx.Exec(ctx, insertIntoHostnames, anHostname); err != nil {
-
-					return err
-				}
-
-				if _, err := tx.Exec(ctx, insertIntoIpsHostnames, ip, anHostname); err != nil {
-
-					return err
-				}
-			}
-		}
-
-		if metaResult.City != nil && metaResult.Country != nil {
-			if _, err := tx.Exec(ctx, insertIntoLocations, *metaResult.City, *metaResult.Country); err != nil {
-
-				return err
-			}
-
-			if _, err := tx.Exec(ctx, insertIntoIpsLocations, ip, *metaResult.City, *metaResult.Country); err != nil {
-
-				return err
-			}
-		} else {
-
-			model.logger.Debug("Could not insert location")
-		}
-
-		if metaResult.Ports != nil {
-			for _, aPort := range *metaResult.Ports {
-				if _, err := tx.Exec(ctx, insertIntoPorts, aPort); err != nil {
-
-					return err
-				}
-
-				if _, err := tx.Exec(ctx, insertIntoIpsPorts, ip, aPort); err != nil {
-
-					return err
-				}
-			}
-		} else {
-
-			model.logger.Debug("Could not insert ports")
-		}
-
-		if metaResult.Isp != nil {
-			if _, err := tx.Exec(ctx, insertIntoIsps, *metaResult.Isp); err != nil {
-
-				return err
-			}
-
-			if _, err := tx.Exec(ctx, insertIntoIpsIsps, ip, *metaResult.Isp); err != nil {
-
-				return err
-			}
-		} else {
-
-			model.logger.Debug("Could not insert isp")
-		}
-
-		if metaResult.Vulnerabilities != nil {
-			for _, aVuln := range *metaResult.Vulnerabilities {
-				if _, err := tx.Exec(ctx, insertIntoVulns, aVuln); err != nil {
-
-					return err
-				}
-
-				if _, err := tx.Exec(ctx, insertIntoIpsVulns, ip, aVuln); err != nil {
-
-					return err
-				}
-			}
-		} else {
-
-			model.logger.Debug("Could not insert vulnerabilities")
-		}
-
-		if metaResult.IsCdn != nil && metaResult.Cdn != nil {
-
-			if *metaResult.IsCdn {
-
-				if _, err := tx.Exec(ctx, insertIfIpIsCdn, *metaResult.Cdn, ip); err != nil {
-
-					return err
-				}
-			} else {
-
-				model.logger.Debugf("%s is not a cdn", ip)
-			}
-		} else {
-
-			model.logger.Debug("Could not insert isCdn")
-		}
-	} else {
-
-		model.logger.Warnf("No info about %s", ip)
+	model.logger.Log.Debugf("Ips merged, encoding now")
+	newBytes, encodingErr := encode(originalDecoded)
+	if encodingErr != nil {
+		return originalValue
 	}
+	model.logger.Log.Debugf("Ips values encoded")
 
-	tx.Commit(ctx)
-	return nil
+	return newBytes
 }
 
-func (model *Model) Action(ctx context.Context, srcIp, dstIp, hostname string, srcPort, dstPort uint16) error {
-	theHostname := sql.NullString{}
-	theSrcPort := sql.NullInt32{}
-	theDstPort := sql.NullInt32{}
-	tx, err := model.pool.BeginTx(ctx, *model.txOpts)
+func metaKey(ip string) []byte {
+	stringKey := strings.Join([]string{ip, "meta"}, "-")
+	return []byte(stringKey)
+}
+
+func actionKey(ip string) []byte {
+	stringKey := strings.Join([]string{ip, "action"}, "-")
+	return []byte(stringKey)
+}
+
+func ipsKey() []byte {
+	return []byte("ips")
+}
+
+func encode[T any](value T) ([]byte, error) {
+	var reader bytes.Buffer
+	encoder := gob.NewEncoder(&reader)
+
+	err := encoder.Encode(value)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return reader.Bytes(), nil
+}
+
+func decode[T any](b []byte) (*T, error) {
+	bufferData := bytes.NewBuffer(b)
+	dec := gob.NewDecoder(bufferData)
+	var v T
+	err := dec.Decode(&v)
 	if err != nil {
 
-		return err
+		return nil, err
 	}
 
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, insertIntoIsps, srcIp); err != nil {
-
-		return err
-	}
-	if _, err := tx.Exec(ctx, insertIntoIsps, dstIp); err != nil {
-
-		return err
-	}
-	if _, err := tx.Exec(ctx, insertIntoHostnames, hostname); err != nil {
-
-		return err
-	}
-
-	if hostname != "" {
-
-		if _, err := tx.Exec(ctx, insertIntoIpsHostnames, dstIp, hostname); err != nil {
-
-			return err
-		}
-		theHostname = sql.NullString{
-			String: hostname,
-			Valid:  true,
-		}
-	}
-
-	if srcPort != 0 {
-
-		if _, err := tx.Exec(ctx, insertIntoPorts, srcPort); err != nil {
-
-			return err
-		}
-		theSrcPort = sql.NullInt32{
-			Int32: int32(srcPort),
-			Valid: true,
-		}
-
-		if _, err := tx.Exec(ctx, insertIntoIpsPorts, srcIp, srcPort); err != nil {
-
-			return err
-		}
-	}
-
-	if dstPort != 0 {
-
-		if _, err := tx.Exec(ctx, insertIntoPorts, dstPort); err != nil {
-
-			return err
-		}
-		theDstPort = sql.NullInt32{
-			Int32: int32(dstPort),
-			Valid: true,
-		}
-
-		if _, err := tx.Exec(ctx, insertIntoIpsPorts, dstIp, dstPort); err != nil {
-
-			return err
-		}
-	}
-
-	if _, err := tx.Exec(ctx, insertIntoSubjects, srcIp, dstIp); err != nil {
-
-		return err
-	}
-
-	if _, err := tx.Exec(ctx, insertIntoActions, srcIp, dstIp, theHostname, theSrcPort, theDstPort); err != nil {
-
-		return err
-	}
-
-	tx.Commit(ctx)
-	return nil
+	return &v, nil
 }

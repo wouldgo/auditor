@@ -5,8 +5,10 @@ BUILDARCH := $(shell uname -m)
 GCC := $(OUT)/$(BUILDARCH)-linux-musl-cross/bin/$(BUILDARCH)-linux-musl-gcc
 LD := $(OUT)/$(BUILDARCH)-linux-musl-cross/bin/$(BUILDARCH)-linux-musl-ld
 VERSION := 2.0.12
+GO_VERSION := $(shell go version  | grep --colour=never -oE '[[:digit:]]+.[[:digit:]]+' | head -n 1)
 
-include LOCAL_ENV
+print:
+	echo $(GO_VERSION)
 
 clean-compile-auditor:     clean musl         deps compile-auditor
 clean-compile-sni-catcher: clean musl libpcap deps compile-sni-catcher
@@ -26,10 +28,10 @@ docker-build-sni-catcher:
 			-f cmd/sni-catcher/Dockerfile \
 			-t ghcr.io/wouldgo/sni-catcher:$(VERSION) .
 
-auditor: deps env
+auditor: deps #env
 	go run cmd/auditor/*.go
 
-sni-catcher-debug: deps env
+sni-catcher-debug: deps #env
 	CGO_CPPFLAGS="-I$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/include" \
 	CGO_LDFLAGS="-L$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/lib" \
 	CGO_ENABLED=1 \
@@ -39,7 +41,7 @@ sni-catcher-debug: deps env
 		-ldflags '-linkmode external -extldflags -static' \
 		-gcflags="all=-N -l" \
 		-a -o _out/sni-catcher cmd/sni-catcher/*.go && \
-	sudo --preserve-env /home/dario/.gvm/pkgsets/go1.18/global/bin/dlv \
+	sudo --preserve-env $(GVM_ROOT)/pkgsets/go$(GO_VERSION)/global/bin/dlv \
 		--listen=:2345 \
 		--headless=true \
 		--api-version=2 \
@@ -60,28 +62,29 @@ compile-auditor:
 	go build \
 		-a -o _out/auditor cmd/auditor/*.go
 
-env:
-	$(eval export $(shell sed -ne 's/ *#.*$$//; /./ s/=.*$$// p' LOCAL_ENV))
+#env:
+#	$(eval export $(shell sed -ne 's/ *#.*$$//; /./ s/=.*$$// p' LOCAL_ENV))
 
-deps:
+deps: musl libpcap
 	go mod tidy -v
 	go mod download
 
 musl:
-	(cd $(OUT); curl -LOk https://musl.cc/$(BUILDARCH)-linux-musl-cross.tgz)
-	tar zxf $(OUT)/$(BUILDARCH)-linux-musl-cross.tgz -C $(OUT)
+	if [ ! -d "$(OUT)/$(BUILDARCH)-linux-musl-cross" ]; then \
+		(cd $(OUT); curl -LOk https://musl.cc/$(BUILDARCH)-linux-musl-cross.tgz) && \
+		tar zxf $(OUT)/$(BUILDARCH)-linux-musl-cross.tgz -C $(OUT); \
+	fi
 
 libpcap:
-	sudo apt install -y flex bison || echo "Your system does not have apt installed. Now it's your risk."
-	(cd $(OUT); curl -LOk https://github.com/the-tcpdump-group/libpcap/archive/libpcap-$(LIBPCAP).tar.gz)
-	tar zxf $(OUT)/libpcap-$(LIBPCAP).tar.gz -C $(OUT)
-	cd $(OUT)/libpcap-libpcap-$(LIBPCAP) && \
-	LD=$(LD) \
-	CC=$(GCC) ./configure \
-		--prefix=$(OUT)/libpcap-$(BUILDARCH)-linux-gnu \
-		LDFLAGS="-static" && \
-	$(MAKE) && \
-	$(MAKE) install
+	if [ ! -d "$(OUT)/libpcap-libpcap-$(LIBPCAP)" ]; then \
+		sudo apt install -y flex bison || echo "Your system does not have apt installed. Now it's your risk."; \
+		(cd $(OUT); curl -LOk https://github.com/the-tcpdump-group/libpcap/archive/libpcap-$(LIBPCAP).tar.gz) && \
+		tar zxf $(OUT)/libpcap-$(LIBPCAP).tar.gz -C $(OUT) && \
+		cd $(OUT)/libpcap-libpcap-$(LIBPCAP) && \
+		LD=$(LD) CC=$(GCC) ./configure --prefix=$(OUT)/libpcap-$(BUILDARCH)-linux-gnu LDFLAGS="-static" && \
+		$(MAKE) && \
+		$(MAKE) install; \
+	fi
 
 clean:
 	rm -Rf $(OUT) $(BINARY_NAME)

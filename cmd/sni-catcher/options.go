@@ -9,7 +9,10 @@ import (
 
 var (
 	ifaceEnv, ifaceEnvSet = os.LookupEnv("INTERFACE_NAME")
-	iface                 = flag.String("iface", "", "Network interface")
+	iface                 = flag.String("iface", "enp0s31f6", "Network interface. Defaults enp0s31f6 ...")
+
+	bpfFilterEnv, bpfFilterEnvSet = os.LookupEnv("BPF_FILTER")
+	bpfFilter                     = flag.String("bpf-filter", "(dst port 443)", "BPF filter. Defaults to traffic with destination port 443")
 )
 
 type Options struct {
@@ -27,8 +30,13 @@ func parseOptions() (*Options, error) {
 		iface = &ifaceEnv
 	}
 
+	if bpfFilterEnvSet {
+		bpfFilter = &bpfFilterEnv
+	}
+
 	pcapConf := &sni.PcapConfiguration{
 		Interface: iface,
+		Filter:    bpfFilter,
 	}
 
 	opts := Options{
