@@ -2,7 +2,6 @@ package model
 
 import (
 	"bytes"
-	"context"
 	"encoding/gob"
 	"fmt"
 	"strings"
@@ -21,15 +20,15 @@ type ModelConfigurations struct {
 }
 
 type Meta struct {
-	Hostnames       []string
-	Isp             *string
-	City            *string
-	Country         *string
-	Organization    *string
-	Ports           []int
-	Vulnerabilities []string
-	IsCdn           *bool
-	Cdn             *string
+	Hostnames       []string `json:"hostnames,omitempty"`
+	Isp             *string  `json:"isp,omitempty"`
+	City            *string  `json:"city,omitempty"`
+	Country         *string  `json:"country,omitempty"`
+	Organization    *string  `json:"organization,omitempty"`
+	Ports           []int    `json:"ports,omitempty"`
+	Vulnerabilities []string `json:"vulnerabilities,omitempty"`
+	IsCdn           *bool    `json:"isCdn,omitempty"`
+	Cdn             *string  `json:"cdn,omitempty"`
 }
 
 type Action struct {
@@ -40,15 +39,33 @@ type Action struct {
 	DstPort  *uint16
 }
 
-type PortTraffic struct {
-	srcPort   *uint16
-	dstPort   *uint16
-	hostnames []string
+type ActionsByIp struct {
+	Ip      *string
+	Traffic map[string][]string
 }
 
-type ActionsByIp struct {
-	ip          *string
-	portTraffic *PortTraffic
+type ModelEntity uint8
+
+const (
+	Ips ModelEntity = iota
+	Actions
+)
+
+type NotFoundErr struct {
+	Entity ModelEntity
+}
+
+var (
+	IpNotFoundErr = &NotFoundErr{
+		Entity: Ips,
+	}
+	ActionNotFoundErr = &NotFoundErr{
+		Entity: Actions,
+	}
+)
+
+func (e *NotFoundErr) Error() string {
+	return fmt.Sprintf("Entity type %v not found", e.Entity)
 }
 
 type Model struct {
@@ -62,15 +79,16 @@ type Model struct {
 	configuration *ModelConfigurations
 	db            *badger.DB
 
-	metaMutex    *sync.RWMutex
-	actionsMutex *sync.RWMutex
+	metaMutex      *sync.RWMutex
+	actionsMutex   *sync.RWMutex
+	ipsMergerMutex *sync.RWMutex
 
 	metaMerger    map[string]*badger.MergeOperator
 	actionsMerger map[string]*badger.MergeOperator
 	ipsMerger     *badger.MergeOperator
 }
 
-func New(logger *logFacility.Logger, ctx context.Context, modelConfigurations *ModelConfigurations) (*Model, error) {
+func New(logger *logFacility.Logger, modelConfigurations *ModelConfigurations) (*Model, error) {
 	logger.Log.Debug("Creating data facility")
 
 	databaseLocation := fmt.Sprintf("%s/%s.data", *modelConfigurations.PathWhereStoreDabaseFile, *modelConfigurations.ApplicationName)
@@ -91,8 +109,9 @@ func New(logger *logFacility.Logger, ctx context.Context, modelConfigurations *M
 		configuration: modelConfigurations,
 		db:            db,
 
-		metaMutex:    &sync.RWMutex{},
-		actionsMutex: &sync.RWMutex{},
+		metaMutex:      &sync.RWMutex{},
+		actionsMutex:   &sync.RWMutex{},
+		ipsMergerMutex: &sync.RWMutex{},
 
 		metaMerger:    make(map[string]*badger.MergeOperator),
 		actionsMerger: make(map[string]*badger.MergeOperator),
@@ -105,17 +124,17 @@ func New(logger *logFacility.Logger, ctx context.Context, modelConfigurations *M
 	return toReturn, nil
 }
 
-func (model *Model) Dispose() error {
-	model.logger.Log.Debug("Closing data structure")
-	model.tickersDone <- true
-	model.garbageCollectionTicker.Stop()
+func (m *Model) Dispose() error {
+	m.logger.Log.Debug("Closing data structure")
+	m.tickersDone <- true
+	m.garbageCollectionTicker.Stop()
 
-	for ip, value := range model.metaMerger {
-		model.logger.Log.Debugf("Stopping meta merger for %s", ip)
+	for ip, value := range m.metaMerger {
+		m.logger.Log.Debugf("Stopping meta merger for %s", ip)
 		value.Stop()
 	}
 
-	err := model.db.Close()
+	err := m.db.Close()
 	if err != nil {
 
 		return err
@@ -124,9 +143,9 @@ func (model *Model) Dispose() error {
 	return nil
 }
 
-func (model *Model) Get() ([]string, error) {
+func (m *Model) Get() ([]string, error) {
 	var valCopy []byte
-	err := model.db.View(func(txn *badger.Txn) error {
+	err := m.db.View(func(txn *badger.Txn) error {
 		item, innerError := txn.Get(ipsKey())
 		if innerError != nil {
 			return innerError
@@ -141,6 +160,11 @@ func (model *Model) Get() ([]string, error) {
 	})
 
 	if err != nil {
+		if err.Error() == errKeyNotFoundStr {
+
+			return []string{}, nil
+		}
+
 		return nil, err
 	}
 
@@ -152,15 +176,15 @@ func (model *Model) Get() ([]string, error) {
 
 	toReturn := make([]string, 0, len(*decodedMeta))
 	for k := range *decodedMeta {
-		toReturn = append(toReturn, k)
+		toReturn = append(toReturn, k.(string))
 	}
 
 	return toReturn, nil
 }
 
-func (model *Model) GetMeta(ip string) (*Meta, error) {
+func (m *Model) GetMeta(ip string) (*Meta, error) {
 	var valCopy []byte
-	err := model.db.View(func(txn *badger.Txn) error {
+	err := m.db.View(func(txn *badger.Txn) error {
 		item, innerError := txn.Get(metaKey(ip))
 		if innerError != nil {
 			return innerError
@@ -175,6 +199,10 @@ func (model *Model) GetMeta(ip string) (*Meta, error) {
 	})
 
 	if err != nil {
+		if err.Error() == errKeyNotFoundStr {
+
+			return nil, IpNotFoundErr
+		}
 		return nil, err
 	}
 
@@ -187,9 +215,9 @@ func (model *Model) GetMeta(ip string) (*Meta, error) {
 	return decodedMeta, nil
 }
 
-func (model *Model) GetActions(ip string) (*ActionsByIp, error) {
+func (m *Model) GetActions(ip string) (*ActionsByIp, error) {
 	var valCopy []byte
-	err := model.db.View(func(txn *badger.Txn) error {
+	err := m.db.View(func(txn *badger.Txn) error {
 		item, innerError := txn.Get(actionKey(ip))
 		if innerError != nil {
 			return innerError
@@ -216,15 +244,15 @@ func (model *Model) GetActions(ip string) (*ActionsByIp, error) {
 	return decodedActions, nil
 }
 
-func (model *Model) StoreMeta(ip string, meta *Meta) error {
+func (m *Model) StoreMeta(ip string, meta *Meta) error {
 	var mergingOperator *badger.MergeOperator
 
-	model.metaMutex.Lock()
-	defer model.metaMutex.Unlock()
-	val, ok := model.metaMerger[ip]
+	m.metaMutex.Lock()
+	defer m.metaMutex.Unlock()
+	val, ok := m.metaMerger[ip]
 	if !ok {
-		mergingOperator = model.db.GetMergeOperator(metaKey(ip), model.mergeMeta, 100*time.Millisecond)
-		model.metaMerger[ip] = mergingOperator
+		mergingOperator = m.db.GetMergeOperator(metaKey(ip), m.mergeMeta, 100*time.Millisecond)
+		m.metaMerger[ip] = mergingOperator
 	} else {
 		mergingOperator = val
 	}
@@ -238,28 +266,27 @@ func (model *Model) StoreMeta(ip string, meta *Meta) error {
 	return nil
 }
 
-func (model *Model) StoreAction(action *Action) error {
-	var scrMergingOperator, dstMergingOperator *badger.MergeOperator
+func (m *Model) StoreAction(action *Action) error {
+	var mergingOperator *badger.MergeOperator
 
-	hostnames := []string{*action.Hostname}[:]
+	hostnames := []string{*action.Hostname}
 
-	model.actionsMutex.Lock()
-	defer model.actionsMutex.Unlock()
-	srcVal, srcMetaKeyIsPresent := model.actionsMerger[*action.SrcAddr]
+	m.actionsMutex.Lock()
+	defer m.actionsMutex.Unlock()
+	srcVal, srcMetaKeyIsPresent := m.actionsMerger[*action.SrcAddr]
 	if !srcMetaKeyIsPresent {
-		scrMergingOperator = model.db.GetMergeOperator(actionKey(*action.SrcAddr), model.mergeActions, 100*time.Millisecond)
-		model.metaMerger[*action.SrcAddr] = scrMergingOperator
+		mergingOperator = m.db.GetMergeOperator(actionKey(*action.SrcAddr), m.mergeActions, 100*time.Millisecond)
+		m.metaMerger[*action.SrcAddr] = mergingOperator
 	} else {
-		scrMergingOperator = srcVal
+		mergingOperator = srcVal
 	}
 
+	newTraffic := make(map[string][]string, 1)
+	newTraffic[*action.DstAddr] = hostnames
+
 	srcActionsByIp := &ActionsByIp{
-		ip: action.SrcAddr,
-		portTraffic: &PortTraffic{
-			srcPort:   action.SrcPort,
-			dstPort:   action.DstPort,
-			hostnames: hostnames,
-		},
+		Ip:      action.SrcAddr,
+		Traffic: newTraffic,
 	}
 
 	srcBytes, err := encode(*srcActionsByIp)
@@ -267,100 +294,144 @@ func (model *Model) StoreAction(action *Action) error {
 		return err
 	}
 
-	scrMergingOperator.Add(srcBytes)
+	mergingOperator.Add(srcBytes)
 
-	dstVal, dstMetaKeyIsPresent := model.actionsMerger[*action.DstAddr]
-	if !dstMetaKeyIsPresent {
-		dstMergingOperator = model.db.GetMergeOperator(actionKey(*action.DstAddr), model.mergeActions, 100*time.Millisecond)
-		model.metaMerger[*action.DstAddr] = dstMergingOperator
-	} else {
-		dstMergingOperator = dstVal
-	}
+	m.ipsMergerMutex.Lock()
+	defer m.ipsMergerMutex.Unlock()
 
-	dstActionsByIp := &ActionsByIp{
-		ip: action.DstAddr,
-		portTraffic: &PortTraffic{
-			srcPort:   action.DstPort,
-			dstPort:   action.SrcPort,
-			hostnames: hostnames,
-		},
-	}
-
-	dstBytes, err := encode(*dstActionsByIp)
-	if err != nil {
+	setToStore := make(set, 1)
+	setToStore[*action.SrcAddr] = setElement
+	srcIps, errIps := encode(setToStore)
+	if errIps != nil {
 		return err
 	}
 
-	dstMergingOperator.Add(dstBytes)
+	m.ipsMerger.Add(srcIps)
 
 	return nil
 }
 
-type set map[string]interface{}
+const errKeyNotFoundStr = "Key not found"
 
-func (model *Model) gc() {
-	model.logger.Log.Debug("Garbage collection local database")
+type elementType struct {
+	PlaceHolder bool
+}
+
+var setElement = elementType{
+	PlaceHolder: true,
+}
+
+type set map[interface{}]elementType
+
+func (m *Model) gc() {
+	m.logger.Log.Debug("Garbage collection local database")
 	for {
 		select {
-		case <-model.tickersDone:
+		case <-m.tickersDone:
 			return
-		case <-model.garbageCollectionTicker.C:
+		case <-m.garbageCollectionTicker.C:
 
-			err := model.db.RunValueLogGC(0.7)
+			err := m.db.RunValueLogGC(0.7)
 			if err != nil && err != badger.ErrNoRewrite {
-				model.logger.Log.Errorf("Garbage collection in error: %s", err.Error())
+				m.logger.Log.Errorf("Garbage collection in error: %s", err.Error())
 			}
 		}
 	}
 }
 
-func (model *Model) mergeMeta(originalValue, newValue []byte) []byte {
-	model.logger.Log.Debugf("Merging meta values")
+func (m *Model) mergeMeta(originalValue, newValue []byte) []byte {
+	m.logger.Log.Debugf("Merging meta values")
 	originalMeta, originalMetaErr := decode[Meta](originalValue)
 	newMeta, newMetaErr := decode[Meta](newValue)
 	if originalMetaErr != nil || newMetaErr != nil {
 		return originalValue
 	}
 
-	newPorts := append(originalMeta.Ports, newMeta.Ports...)
-	newHostnames := append(originalMeta.Hostnames, newMeta.Hostnames...)
+	newPortsSet := make(set, len(originalMeta.Ports)+len(newMeta.Ports))
+	for value := range originalMeta.Ports {
+		newPortsSet[value] = setElement
+	}
 
+	for value := range newMeta.Ports {
+		newPortsSet[value] = setElement
+	}
+
+	newPorts := make([]int, 0, len(originalMeta.Ports)+len(newMeta.Ports))
+	for k := range newPortsSet {
+		newPorts = append(newPorts, k.(int))
+	}
 	originalMeta.Ports = newPorts
+
+	newHostnamesSet := make(set, len(originalMeta.Ports)+len(newMeta.Ports))
+	for _, value := range originalMeta.Hostnames {
+		newHostnamesSet[value] = setElement
+	}
+
+	for _, value := range newMeta.Hostnames {
+		newHostnamesSet[value] = setElement
+	}
+
+	newHostnames := make([]string, 0, len(originalMeta.Ports)+len(newMeta.Ports))
+	for k := range newHostnamesSet {
+		newHostnames = append(newHostnames, k.(string))
+	}
 	originalMeta.Hostnames = newHostnames
 
-	model.logger.Log.Debugf("Meta values merged, encoding now")
+	m.logger.Log.Debugf("Meta values merged, encoding now")
 	newBytes, encodingErr := encode(originalMeta)
 	if encodingErr != nil {
 		return originalValue
 	}
-	model.logger.Log.Debugf("Meta values encoded")
+	m.logger.Log.Debugf("Meta values encoded")
 
 	return newBytes
 }
 
-func (model *Model) mergeActions(originalValue, newValue []byte) []byte {
-	model.logger.Log.Debugf("Merging actions values")
+func (m *Model) mergeActions(originalValue, newValue []byte) []byte {
+	m.logger.Log.Debugf("Merging actions values")
 	originalDecoded, originalDecodeErr := decode[ActionsByIp](originalValue)
 	newDecoded, newDecodeErr := decode[ActionsByIp](newValue)
 	if originalDecodeErr != nil || newDecodeErr != nil {
 		return originalValue
 	}
 
-	newHostnames := append(originalDecoded.portTraffic.hostnames, newDecoded.portTraffic.hostnames...)
-	originalDecoded.portTraffic.hostnames = newHostnames
+	for key, value := range newDecoded.Traffic {
 
-	model.logger.Log.Debugf("Actions values merged, encoding now")
+		oldTrafficValue, isTrafficPresent := originalDecoded.Traffic[key]
+		if isTrafficPresent {
+			newHostnamesSet := make(set, len(oldTrafficValue)+len(value))
+			for _, value := range oldTrafficValue {
+				newHostnamesSet[value] = setElement
+			}
+
+			for _, value := range value {
+				newHostnamesSet[value] = setElement
+			}
+
+			newHostnames := make([]string, 0, len(oldTrafficValue)+len(value))
+			for k := range newHostnamesSet {
+				newHostnames = append(newHostnames, k.(string))
+			}
+
+			originalDecoded.Traffic[key] = newHostnames
+		} else {
+
+			originalDecoded.Traffic[key] = value
+		}
+	}
+
+	m.logger.Log.Debugf("Actions values merged, encoding now")
 	newBytes, encodingErr := encode(originalDecoded)
 	if encodingErr != nil {
 		return originalValue
 	}
-	model.logger.Log.Debugf("Action values encoded")
+	m.logger.Log.Debugf("Action values encoded")
 
 	return newBytes
 }
 
-func (model *Model) mergeIps(originalValue, newValue []byte) []byte {
-	model.logger.Log.Debugf("Merging ips")
+func (m *Model) mergeIps(originalValue, newValue []byte) []byte {
+	m.logger.Log.Debugf("Merging ips")
 	originalDecoded, originalDecodeErr := decode[set](originalValue)
 	newDecoded, newDecodeErr := decode[set](newValue)
 	if originalDecodeErr != nil || newDecodeErr != nil {
@@ -368,15 +439,15 @@ func (model *Model) mergeIps(originalValue, newValue []byte) []byte {
 	}
 
 	for k := range *newDecoded {
-		(*originalDecoded)[k] = struct{}{}
+		(*originalDecoded)[k] = setElement
 	}
 
-	model.logger.Log.Debugf("Ips merged, encoding now")
+	m.logger.Log.Debugf("Ips merged, encoding now")
 	newBytes, encodingErr := encode(originalDecoded)
 	if encodingErr != nil {
 		return originalValue
 	}
-	model.logger.Log.Debugf("Ips values encoded")
+	m.logger.Log.Debugf("Ips values encoded")
 
 	return newBytes
 }

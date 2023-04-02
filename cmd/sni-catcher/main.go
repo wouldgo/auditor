@@ -7,8 +7,10 @@ import (
 
 	_ "github.com/breml/rootcerts"
 
+	"auditor/api"
 	"auditor/healthiness"
 	"auditor/meta"
+	"auditor/model"
 	"auditor/sni"
 )
 
@@ -22,7 +24,12 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	meta, metaErr := meta.New(options.Logger, options.Meta)
+	model, modelErr := model.New(options.Logger, options.Model)
+	if err != nil {
+		options.Logger.Log.Fatal(modelErr)
+	}
+
+	meta, metaErr := meta.New(options.Logger, model, options.Meta)
 	if metaErr != nil {
 		options.Logger.Log.Fatal(metaErr)
 	}
@@ -32,8 +39,15 @@ func main() {
 		options.Logger.Log.Fatal(sniErr)
 	}
 
+	api, apiErr := api.New(options.Logger, model)
+	if apiErr != nil {
+		options.Logger.Log.Fatal(apiErr)
+	}
+
 	go sniHandler.Handle()
 	go meta.FromChan(sniHandler.C)
+	go api.Up()
+
 	go healthiness.Healthiness(options.Logger)
 	sig := <-stop
 	options.Logger.Log.Infof("Caught %v", sig)

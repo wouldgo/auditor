@@ -29,7 +29,20 @@ docker-build-sni-catcher:
 			-t ghcr.io/wouldgo/sni-catcher:$(VERSION) .
 
 auditor: deps #env
+	DATABASE_FILE=$(OUT) \
 	go run cmd/auditor/*.go
+
+sni-catcher: deps #env
+	CGO_CPPFLAGS="-I$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/include" \
+	CGO_LDFLAGS="-L$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/lib" \
+	CGO_ENABLED=1 \
+	CC_FOR_TARGET=$(GCC) \
+	CC=$(GCC) \
+	go build \
+		-ldflags '-linkmode external -extldflags -static' \
+		-gcflags="all=-N -l" \
+		-a -o _out/sni-catcher cmd/sni-catcher/*.go && \
+	sudo --preserve-env ./_out/sni-catcher --database-file=$(OUT)
 
 sni-catcher-debug: deps #env
 	CGO_CPPFLAGS="-I$(OUT)/libpcap-$(BUILDARCH)-linux-gnu/include" \
@@ -41,7 +54,7 @@ sni-catcher-debug: deps #env
 		-ldflags '-linkmode external -extldflags -static' \
 		-gcflags="all=-N -l" \
 		-a -o _out/sni-catcher cmd/sni-catcher/*.go && \
-	sudo --preserve-env $(GVM_ROOT)/pkgsets/go$(GO_VERSION)/global/bin/dlv \
+	DATABASE_FILE=$(OUT) sudo --preserve-env $(GVM_ROOT)/pkgsets/go$(GO_VERSION)/global/bin/dlv \
 		--listen=:2345 \
 		--headless=true \
 		--api-version=2 \
@@ -87,6 +100,6 @@ libpcap:
 	fi
 
 clean:
-	rm -Rf $(OUT) $(BINARY_NAME)
+	sudo rm -Rf $(OUT) $(BINARY_NAME)
 	mkdir -p $(OUT)
 	touch $(OUT)/.keep

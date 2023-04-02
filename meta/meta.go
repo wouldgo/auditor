@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
@@ -16,8 +17,6 @@ import (
 )
 
 type MetaConfiguration struct {
-	ModelConfigurations *model.ModelConfigurations
-
 	ShodanApiKey *string
 
 	CacheSize     *int
@@ -30,7 +29,6 @@ type Meta struct {
 	resolver                  *net.Resolver
 	log                       *logFacility.Logger
 	cache                     *lru.ARCCache
-	locale                    *string
 	shodanClient              *shodan.Client
 	shodanHostServicesOptions *shodan.HostServicesOptions
 	cdncheck                  *cdncheck.Client
@@ -138,22 +136,31 @@ func (meta *Meta) fromString(ipAddr string) (*model.Meta, error) {
 }
 
 func (meta *Meta) FromChan(metaChan chan *model.Action) {
+	var wg sync.WaitGroup
 	for aMetaInput := range metaChan {
 
-		if _, srcAddrErr := meta.fromString(*aMetaInput.SrcAddr); srcAddrErr != nil {
+		wg.Add(1)
+		go toModel(meta, aMetaInput, &wg)
+	}
+	wg.Wait()
+}
 
-			meta.log.Log.Warn(srcAddrErr)
-		}
+func toModel(meta *Meta, aMetaInput *model.Action, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-		if _, dstsrcAddrErr := meta.fromString(*aMetaInput.DstAddr); dstsrcAddrErr != nil {
+	if _, srcAddrErr := meta.fromString(*aMetaInput.SrcAddr); srcAddrErr != nil {
 
-			meta.log.Log.Warn(dstsrcAddrErr)
-		}
+		meta.log.Log.Warn(srcAddrErr)
+	}
 
-		if err := meta.model.StoreAction(aMetaInput); err != nil {
+	if _, dstsrcAddrErr := meta.fromString(*aMetaInput.DstAddr); dstsrcAddrErr != nil {
 
-			meta.log.Log.Warn(err)
-		}
+		meta.log.Log.Warn(dstsrcAddrErr)
+	}
+
+	if err := meta.model.StoreAction(aMetaInput); err != nil {
+
+		meta.log.Log.Warn(err)
 	}
 }
 
@@ -164,12 +171,7 @@ func (meta *Meta) Dispose() {
 	meta.printCacheInfoTicker.Stop()
 }
 
-func New(logger *logFacility.Logger, metaConfs *MetaConfiguration) (*Meta, error) {
-	model, err := model.New(logger, context.Background(), metaConfs.ModelConfigurations)
-	if err != nil {
-		return nil, err
-	}
-
+func New(logger *logFacility.Logger, model *model.Model, metaConfs *MetaConfiguration) (*Meta, error) {
 	cache, cacheCreateErr := lru.NewARC(*metaConfs.CacheSize)
 	if cacheCreateErr != nil {
 
@@ -217,7 +219,7 @@ func (m *Meta) cachePurge() {
 		select {
 		case <-m.tickersDone:
 			return
-		case _ = <-m.cachePurgeTicker.C:
+		case <-m.cachePurgeTicker.C:
 			m.log.Log.Debugf("Cache evictor started")
 			m.cache.Purge()
 			m.log.Log.Debugf("Cache is purged")
@@ -230,7 +232,7 @@ func (m *Meta) printCacheInfo() {
 		select {
 		case <-m.tickersDone:
 			return
-		case _ = <-m.printCacheInfoTicker.C:
+		case <-m.printCacheInfoTicker.C:
 			cachedEntries := m.cache.Len()
 			m.log.Log.Debugf("Cached entries are %v", cachedEntries)
 		}

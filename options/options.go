@@ -16,10 +16,9 @@ import (
 )
 
 var (
-	tmpDir                    = os.TempDir()
-	eigthHours, _             = time.ParseDuration("8h")
-	twoHundredMilliseconds, _ = time.ParseDuration("200ms")
-	executableDefaultName, _  = os.Executable()
+	eigthHours, _           = time.ParseDuration("8h")
+	defaultModelMergersTime = 200 * time.Millisecond
+	executableDefaultName   = os.Args[0]
 
 	dnsEnv, dnsEnvSet = os.LookupEnv("DNS")
 	dns               = flag.String("dns", "1.1.1.1:53", "DNS server to use")
@@ -46,8 +45,8 @@ var (
 )
 
 type OptionsBase struct {
-	Meta *meta.MetaConfiguration
-
+	Model  *model.ModelConfigurations
+	Meta   *meta.MetaConfiguration
 	Logger *logFacility.Logger
 }
 
@@ -111,7 +110,7 @@ func Parse() (*OptionsBase, error) {
 
 	if strings.EqualFold(*shodanApiKey, "") {
 
-		return nil, errors.New("Shodan api key must be present")
+		return nil, errors.New("shodan api key must be present")
 	}
 
 	if pathWhereStoreDatabaseFileEnvSet {
@@ -123,11 +122,6 @@ func Parse() (*OptionsBase, error) {
 	}
 
 	metaConf := &meta.MetaConfiguration{
-		ModelConfigurations: &model.ModelConfigurations{
-			PathWhereStoreDabaseFile: pathWhereStoreDabaseFile,
-			ApplicationName:          applicationName,
-			ModelMergersTime:         twoHundredMilliseconds,
-		},
 		ShodanApiKey:  shodanApiKey,
 		CacheSize:     cacheSize,
 		CacheEviction: cacheEviction,
@@ -140,6 +134,11 @@ func Parse() (*OptionsBase, error) {
 		return &OptionsBase{}, nil
 	}
 	opts := &OptionsBase{
+		Model: &model.ModelConfigurations{
+			PathWhereStoreDabaseFile: pathWhereStoreDabaseFile,
+			ApplicationName:          applicationName,
+			ModelMergersTime:         defaultModelMergersTime,
+		},
 		Meta: metaConf,
 		Logger: &logFacility.Logger{
 			Log: sugar,

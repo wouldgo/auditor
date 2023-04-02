@@ -60,7 +60,6 @@ func (h *Handler) Handle() {
 	var wg sync.WaitGroup
 
 	for packet := range source.Packets() {
-		h.logger.Log.Debug("Got data")
 		wg.Add(1)
 		go h.managePacket(packet, &wg)
 	}
@@ -68,6 +67,8 @@ func (h *Handler) Handle() {
 }
 
 func (h *Handler) managePacket(packet gopacket.Packet, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		// cast TCP layer
 		tcp, ok := tcpLayer.(*layers.TCP)
@@ -82,6 +83,7 @@ func (h *Handler) managePacket(packet gopacket.Packet, wg *sync.WaitGroup) {
 		} else {
 			// data packet
 			// process TLS client hello
+			h.logger.Log.Debug("Got data")
 			clientHello := tlsx.GetClientHello(packet)
 			if clientHello != nil {
 				srcPortUi64, err := strconv.ParseUint(packet.TransportLayer().TransportFlow().Src().String(), 10, 64)
@@ -105,7 +107,7 @@ func (h *Handler) managePacket(packet gopacket.Packet, wg *sync.WaitGroup) {
 				source := fmt.Sprintf("%s:%d", srcAddr, srcPort)
 				destination := fmt.Sprintf("%s:%d", dstAddr, dstPort)
 
-				h.logger.Log.Debugf("[ %s -> %s ] | %s", source, destination, hostName)
+				h.logger.Log.Infof("[ %s -> %s ] | %s", source, destination, hostName)
 
 				h.C <- &model.Action{
 					SrcAddr:  &srcAddr,
@@ -114,8 +116,10 @@ func (h *Handler) managePacket(packet gopacket.Packet, wg *sync.WaitGroup) {
 					DstPort:  &dstPort,
 					Hostname: &hostName,
 				}
+			} else {
+
+				h.logger.Log.Debug("Not clientHello packet")
 			}
 		}
 	}
-	wg.Done()
 }
