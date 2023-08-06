@@ -71,8 +71,7 @@ func (e *NotFoundErr) Error() string {
 type Model struct {
 	logger *logFacility.Logger
 
-	garbageCollectionTicker     *time.Ticker
-	garbageCollectionTickerDone chan bool
+	garbageCollectionTicker *time.Ticker
 
 	tickersDone chan bool
 
@@ -101,8 +100,7 @@ func New(logger *logFacility.Logger, modelConfigurations *ModelConfigurations) (
 	toReturn := &Model{
 		logger: logger,
 
-		garbageCollectionTicker:     time.NewTicker(2 * time.Minute),
-		garbageCollectionTickerDone: make(chan bool),
+		garbageCollectionTicker: time.NewTicker(2 * time.Minute),
 
 		tickersDone: make(chan bool),
 
@@ -129,8 +127,17 @@ func (m *Model) Dispose() error {
 	m.tickersDone <- true
 	m.garbageCollectionTicker.Stop()
 
+	m.metaMutex.Lock()
+	defer m.metaMutex.Unlock()
 	for ip, value := range m.metaMerger {
 		m.logger.Log.Debugf("Stopping meta merger for %s", ip)
+		value.Stop()
+	}
+
+	m.actionsMutex.Lock()
+	defer m.actionsMutex.Unlock()
+	for ip, value := range m.actionsMerger {
+		m.logger.Log.Debugf("Stopping actions merger for %s", ip)
 		value.Stop()
 	}
 
